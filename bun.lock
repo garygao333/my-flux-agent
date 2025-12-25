@@ -8,7 +8,7 @@
         "@langchain/core": "^0.3.0",
         "@langchain/langgraph": "^0.2.0",
         "@langchain/openai": "^0.3.0",
-        "@photon-cli/flux": "^0.2.4",
+        "@photon-cli/flux": "^0.3.0",
         "dotenv": "^16.3.1",
         "langchain": "^0.3.0",
         "zod": "^3.22.4",
@@ -43,7 +43,7 @@
 
     "@langchain/textsplitters": ["@langchain/textsplitters@0.1.0", "", { "dependencies": { "js-tiktoken": "^1.0.12" }, "peerDependencies": { "@langchain/core": ">=0.2.21 <0.4.0" } }, "sha512-djI4uw9rlkAb5iMhtLED+xJebDdAG935AdP4eRTB02R7OB/act55Bj9wsskhZsvuyQRpO4O1wQOp85s6T6GWmw=="],
 
-    "@photon-cli/flux": ["@photon-cli/flux@0.2.4", "", { "bin": { "flux": "dist/cli.js" } }, "sha512-MLm3kPvIkInTNELVgXSX2w9Jgl0Y5T9jk8svWhRWz/rwabu7enBIeK0M2ivjdtm9PWlg2+QvJoHQLrcYL1gR4g=="],
+    "@photon-cli/flux": ["@photon-cli/flux@0.3.0", "", { "bin": { "flux": "dist/index.js" } }, "sha512-gwxonAgE/wjTAfHDRIhRgkOifSfFQMW3htbUYmfyQXnEPkbRDMI/9Kz48l485H6wvSRkZMWTTrhvZCtalYsGdg=="],
 
     "@tsconfig/node10": ["@tsconfig/node10@1.0.12", "", {}, "sha512-UCYBaeFvM11aU2y3YPZ//O5Rhj+xKyzy7mvcIoAjASbigy8mHMryP5cK7dgjlz2hWxh1g5pLw084E0a/wlUSFQ=="],
 
