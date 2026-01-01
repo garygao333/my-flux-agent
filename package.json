@@ -6,7 +6,8 @@
     "start": "npx ts-node --esm agent.ts"
   },
   "dependencies": {
-    "dotenv": "^16.6.1"
+    "dotenv": "^16.6.1",
+    "openai": "^4.70.0"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

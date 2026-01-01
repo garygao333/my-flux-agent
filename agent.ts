@@ -1,126 +1,153 @@
 import "dotenv/config";
+import OpenAI from "openai";
 
 // Type definitions for Flux
 type TapbackType = "love" | "like" | "dislike" | "laugh" | "emphasize" | "question";
 type SendMessageFn = (to: string, text: string) => Promise<boolean>;
-type SendTapbackFn = (messageGuid: string, tapback: TapbackType) => Promise<boolean>;
+type SendTapbackFn = (messageGuid: string, reaction: TapbackType, userPhoneNumber: string) => Promise<boolean>;
+
+// Store functions from onInit
+let sendTapback: SendTapbackFn | undefined;
+
+// OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// Conversation history per user
+const conversations: Map<string, Array<{ role: "user" | "assistant" | "system"; content: string }>> = new Map();
+
+// System prompt for the chatbot
+const SYSTEM_PROMPT = `You are a friendly and helpful conversational assistant communicating via iMessage.
+Keep responses concise and natural - this is a text conversation, not an essay.
+Be warm, engaging, and use occasional emojis where appropriate.
+
+IMPORTANT: When the user expresses POSITIVE emotion, you MUST start your response with exactly this format (no variations):
+[TAPBACK:love] - for gratitude, excitement, good news
+[TAPBACK:laugh] - for jokes, "lol", "haha", funny things
+[TAPBACK:emphasize] - for "awesome!", "wow!", impressive things
+[TAPBACK:like] - for agreement, "cool", "nice"
+
+NEVER use tapbacks for:
+- Serious, sad, or concerning messages
+- Questions or confusion (do NOT use [TAPBACK:question])
+- Negative emotions or distress
+
+The format MUST be exactly [TAPBACK:type] - not [Laugh], not [Love], not any other format.
+
+Examples of CORRECT responses:
+- User: "thanks!" -> "[TAPBACK:love] You're welcome!"
+- User: "lol" -> "[TAPBACK:laugh] Glad you found that funny!"
+- User: "I got promoted!" -> "[TAPBACK:love] That's amazing, congratulations!"
+
+Only use tapbacks when genuinely appropriate for positive moments.`;
+
+// Parse tapback from response
+function extractTapback(response: string): { tapback: TapbackType | null; cleanResponse: string } {
+  // Try the correct format first: [TAPBACK:type]
+  let tapbackMatch = response.match(/^\[TAPBACK:(love|like|dislike|laugh|emphasize|question)\]/i);
+
+  // Fallback: handle incorrect formats like [Laugh], [Love], etc.
+  if (!tapbackMatch) {
+    tapbackMatch = response.match(/^\[(Love|Like|Dislike|Laugh|Emphasize|Question)\]/i);
+  }
+
+  if (tapbackMatch) {
+    const tapback = tapbackMatch[1].toLowerCase() as TapbackType;
+    const cleanResponse = response.replace(tapbackMatch[0], "").trim();
+    return { tapback, cleanResponse };
+  }
+  return { tapback: null, cleanResponse: response };
+}
+
+// Get or create conversation history
+function getConversation(userPhone: string) {
+  if (!conversations.has(userPhone)) {
+    conversations.set(userPhone, [{ role: "system", content: SYSTEM_PROMPT }]);
+  }
+  return conversations.get(userPhone)!;
+}
+
+// Limit conversation history to prevent token overflow
+function trimConversation(history: Array<{ role: "user" | "assistant" | "system"; content: string }>) {
+  const MAX_MESSAGES = 20;
+  if (history.length > MAX_MESSAGES) {
+    // Keep system prompt and last N messages
+    const systemPrompt = history[0];
+    const recentMessages = history.slice(-MAX_MESSAGES + 1);
+    history.length = 0;
+    history.push(systemPrompt, ...recentMessages);
+  }
+}
 
 interface InvokeParams {
   message: string;
   userPhoneNumber: string;
   messageGuid?: string;
-  imageBase64?: string;
 }
 
-interface FluxAgent {
-  sendMessage?: SendMessageFn;
-  sendTapback?: SendTapbackFn;
-  onInit?: (sendMessage: SendMessageFn, sendTapback: SendTapbackFn) => Promise<void>;
-  invoke: (params: InvokeParams) => Promise<string>;
-  onError?: (error: Error) => Promise<void>;
-  onShutdown?: () => Promise<void>;
-}
-
-const agent: FluxAgent = {
-  sendMessage: undefined,
-  sendTapback: undefined,
-
-  onInit: async (sendMessage, sendTapback) => {
-    agent.sendMessage = sendMessage;
-    agent.sendTapback = sendTapback;
-    console.log("[AGENT] onInit called with tapback support!");
+export default {
+  onInit: async (_sendMessage: SendMessageFn, _sendTapback: SendTapbackFn) => {
+    sendTapback = _sendTapback;
+    console.log("[AGENT] onInit called - ChatGPT agent ready with tapback support!");
   },
 
-  invoke: async ({ message, messageGuid }) => {
+  invoke: async ({ message, userPhoneNumber, messageGuid }: InvokeParams) => {
+    console.log("[AGENT] Message from", userPhoneNumber, ":", message);
+    console.log("[AGENT] messageGuid:", messageGuid);
+
+    // Handle special commands
     const lowerMessage = message.toLowerCase().trim();
 
-    // Debug logging
-    console.log("[AGENT] invoke called");
-    console.log("[AGENT] messageGuid:", messageGuid);
-    console.log("[AGENT] sendTapback available:", !!agent.sendTapback);
+    if (lowerMessage === "clear" || lowerMessage === "reset") {
+      conversations.delete(userPhoneNumber);
+      return "Conversation cleared! Let's start fresh. 🔄";
+    }
 
-    // React with love to thank you messages
-    if (lowerMessage.includes("thank you") || lowerMessage.includes("thanks")) {
-      if (agent.sendTapback && messageGuid) {
+    try {
+      // Get conversation history
+      const history = getConversation(userPhoneNumber);
+
+      // Add user message
+      history.push({ role: "user", content: message });
+
+      // Trim if too long
+      trimConversation(history);
+
+      // Call OpenAI
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: history,
+        max_tokens: 300,
+        temperature: 0.8,
+      });
+
+      const response = completion.choices[0]?.message?.content || "I'm not sure how to respond to that.";
+
+      // Extract tapback if suggested by GPT
+      const { tapback, cleanResponse } = extractTapback(response);
+
+      // Send tapback if appropriate
+      if (tapback && sendTapback && messageGuid) {
         try {
-          console.log("[AGENT] Sending love tapback...");
-          await agent.sendTapback(messageGuid, "love");
-          console.log("[AGENT] Tapback sent successfully!");
+          console.log("[AGENT] Sending tapback:", tapback);
+          await sendTapback(messageGuid, tapback, userPhoneNumber);
         } catch (err) {
           console.log("[AGENT] Tapback error:", (err as Error).message);
         }
       }
-      return "You're welcome! 😊";
-    }
 
-    // React with laugh to jokes/funny
-    if (lowerMessage.includes("lol") || lowerMessage.includes("haha") || lowerMessage.includes("funny")) {
-      if (agent.sendTapback && messageGuid) {
-        try {
-          await agent.sendTapback(messageGuid, "laugh");
-        } catch (err) {
-          console.log("[AGENT] Tapback error:", (err as Error).message);
-        }
-      }
-      return "Glad you found it funny! 😄";
-    }
+      // Add assistant response to history (without tapback tag)
+      history.push({ role: "assistant", content: cleanResponse });
 
-    // React with emphasis to excitement
-    if (lowerMessage.includes("!") && (lowerMessage.includes("wow") || lowerMessage.includes("amazing") || lowerMessage.includes("awesome"))) {
-      if (agent.sendTapback && messageGuid) {
-        try {
-          await agent.sendTapback(messageGuid, "emphasize");
-        } catch (err) {
-          console.log("[AGENT] Tapback error:", (err as Error).message);
-        }
-      }
-      return "I know right?!\nThat's exciting!";
+      return cleanResponse;
+    } catch (err) {
+      console.error("[AGENT] OpenAI error:", err);
+      return "Sorry, I'm having trouble connecting right now. Try again in a moment! 🔄";
     }
-
-    // React with like to positive messages
-    if (lowerMessage.includes("cool") || lowerMessage.includes("nice") || lowerMessage.includes("great")) {
-      if (agent.sendTapback && messageGuid) {
-        try {
-          await agent.sendTapback(messageGuid, "like");
-        } catch (err) {
-          console.log("[AGENT] Tapback error:", (err as Error).message);
-        }
-      }
-      return "👍";
-    }
-
-    // React with question to confusing messages
-    if (lowerMessage.includes("?") && lowerMessage.length < 10) {
-      if (agent.sendTapback && messageGuid) {
-        try {
-          await agent.sendTapback(messageGuid, "question");
-        } catch (err) {
-          console.log("[AGENT] Tapback error:", (err as Error).message);
-        }
-      }
-      return "Could you tell me more?";
-    }
-
-    // Greeting - multiple bubbles
-    if (lowerMessage === "hi" || lowerMessage === "hello" || lowerMessage === "hey") {
-      return "Hey there! 👋\nHow's it going?\nWhat can I help you with today?";
-    }
-
-    // Test command
-    if (lowerMessage === "test") {
-      return "Bubble 1: First message\nBubble 2: Second message\nBubble 3: Third message";
-    }
-
-    // Help command
-    if (lowerMessage === "help") {
-      return "📱 Chat Agent with Tapbacks!\n\nTry saying:\n• 'thanks' - I'll ❤️ your message\n• 'haha' - I'll 😂 your message\n• 'awesome!' - I'll ‼️ your message\n• 'cool' - I'll 👍 your message";
-    }
-
-    // Default
-    return "I'm here! Try 'hi', 'test', 'help', or say 'thanks' to see tapbacks! 😊";
   },
 
-  onError: async (error) => {
+  onError: async (error: Error) => {
     console.error("[AGENT] Error:", error);
   },
 
@@ -128,5 +155,3 @@ const agent: FluxAgent = {
     console.log("[AGENT] Shutting down...");
   },
 };
-
-export default agent;
