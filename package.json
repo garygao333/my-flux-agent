@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "npx ts-node --esm agent.ts"
+    "start": "bun run agent.ts"
   },
   "dependencies": {
+    "composio-core": "^0.5.39",
     "dotenv": "^16.6.1",
     "openai": "^4.70.0"
   },
