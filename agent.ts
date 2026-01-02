@@ -10,78 +10,162 @@ const openrouter = new OpenAI({
 });
 
 const composio = new Composio({ apiKey: process.env.COMPOSIO_API_KEY! });
+const entity = composio.getEntity("default");
 
-type ChatMessage = { role: "user" | "assistant" | "system"; content: string };
-const conversations = new Map<string, ChatMessage[]>();
+// Flux provides these via onInit (production mode only)
+let sendMessage: ((to: string, text: string) => Promise<boolean>) | undefined;
 
-function getHistory(userId: string): ChatMessage[] {
-  if (!conversations.has(userId)) conversations.set(userId, []);
-  return conversations.get(userId)!;
-}
+// Track seen email IDs to avoid duplicate notifications
+const seenEmailIds = new Set<string>();
 
-function addMessage(userId: string, role: "user" | "assistant", content: string): void {
-  const history = getHistory(userId);
-  history.push({ role, content });
-  if (history.length > 20) history.splice(0, history.length - 20);
-}
+// Your phone number - will be set when you first message the agent
+let myPhoneNumber: string | undefined;
 
-async function searchWeb(query: string): Promise<string> {
+const SYSTEM_PROMPT = `You are a helpful email assistant. You notify the user about new emails and can answer questions about their inbox. Keep responses concise.`;
+
+// Check for new emails
+async function checkForNewEmails(): Promise<{ id: string; from: string; subject: string; snippet: string }[]> {
   try {
-    const entity = composio.getEntity("default");
     const result = await entity.execute({
-      actionName: "COMPOSIO_SEARCH_SEARCH",
-      params: { query, num_results: 5 },
+      actionName: "GMAIL_FETCH_EMAILS",
+      params: {
+        max_results: 10,
+        label_ids: ["INBOX"],
+      },
     });
 
     const data = result.data as any;
-    if (!result.successfull) return "";
+    if (!result.successfull || !data?.messages) return [];
 
-    // The results are nested: data.results.organic_results
-    const searchResults = data?.results?.organic_results || data?.organic_results || [];
-    if (!Array.isArray(searchResults) || searchResults.length === 0) return "";
+    const newEmails: { id: string; from: string; subject: string; snippet: string }[] = [];
 
-    return searchResults.slice(0, 5).map((r: any, i: number) =>
-      `${i + 1}. ${r.title || 'Result'}\n   ${r.snippet || r.description || ""}`
-    ).join("\n\n");
+    for (const email of data.messages) {
+      const emailId = email.id || email.messageId;
+      if (emailId && !seenEmailIds.has(emailId)) {
+        seenEmailIds.add(emailId);
+        newEmails.push({
+          id: emailId,
+          from: email.from || "Unknown sender",
+          subject: email.subject || "No subject",
+          snippet: email.snippet || email.body?.substring(0, 100) || "",
+        });
+      }
+    }
+
+    return newEmails;
   } catch (error) {
-    console.error("Search error:", error);
-    return "";
+    console.error("[Email] Fetch error:", error);
+    return [];
   }
 }
 
-function needsWebSearch(message: string): boolean {
-  const patterns = [/what is/i, /who is/i, /when/i, /where/i, /how/i, /why/i, /latest/i, /news/i, /\?$/];
-  return patterns.some(p => p.test(message));
-}
-
-const SYSTEM_PROMPT = `You are a helpful assistant that can search the web. Answer questions naturally using search results when needed. Keep responses concise.`;
-
-export default {
-  async invoke({ message, userPhoneNumber }: { message: string; userPhoneNumber: string }): Promise<string> {
-    const history = getHistory(userPhoneNumber);
-
-    let searchContext = "";
-    if (needsWebSearch(message)) {
-      console.log("[Agent] Searching web for:", message);
-      const results = await searchWeb(message);
-      if (results) searchContext = `\n\n[Search results]:\n${results}`;
-    }
-
-    const messages: ChatMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...history,
-      { role: "user", content: message + searchContext }
-    ];
-
-    const completion = await openrouter.chat.completions.create({
-      model: "openai/gpt-4o-mini",
-      messages,
-      max_tokens: 256,
+// Initialize seen emails on startup (so we don't notify for old emails)
+async function initializeSeenEmails() {
+  try {
+    const result = await entity.execute({
+      actionName: "GMAIL_FETCH_EMAILS",
+      params: {
+        max_results: 20,
+        label_ids: ["INBOX"],
+      },
     });
 
-    const response = completion.choices[0]?.message?.content || "hmm let me think";
-    addMessage(userPhoneNumber, "user", message);
-    addMessage(userPhoneNumber, "assistant", response);
-    return response;
+    const data = result.data as any;
+    if (result.successfull && data?.messages) {
+      for (const email of data.messages) {
+        const emailId = email.id || email.messageId;
+        if (emailId) seenEmailIds.add(emailId);
+      }
+      console.log(`[Email] Initialized with ${seenEmailIds.size} existing emails`);
+    }
+  } catch (error) {
+    console.error("[Email] Init error:", error);
+  }
+}
+
+export default {
+  async onInit(_sendMessage?: typeof sendMessage) {
+    sendMessage = _sendMessage;
+    console.log("[Agent] Initialized", { hasProactive: !!sendMessage });
+
+    // Initialize seen emails so we don't notify for existing ones
+    await initializeSeenEmails();
+
+    // Start polling for new emails every 30 seconds
+    if (sendMessage) {
+      setInterval(async () => {
+        if (!myPhoneNumber) {
+          console.log("[Email] Waiting for user to message first...");
+          return;
+        }
+
+        console.log("[Email] Checking for new emails...");
+        const newEmails = await checkForNewEmails();
+
+        for (const email of newEmails) {
+          const notification = `📧 New email from ${email.from}:\n"${email.subject}"\n\n${email.snippet}...`;
+          console.log(`[Email] Notifying: ${email.subject}`);
+          await sendMessage!(myPhoneNumber, notification);
+        }
+      }, 10000); // Check every 10 seconds
+    }
+  },
+
+  async invoke({ message, userPhoneNumber }: {
+    message: string;
+    userPhoneNumber: string;
+  }): Promise<string> {
+    // Remember the user's phone number for proactive notifications
+    myPhoneNumber = userPhoneNumber;
+
+    const lowerMessage = message.toLowerCase();
+
+    // Manual email check
+    if (lowerMessage.includes("email") || lowerMessage.includes("inbox") || lowerMessage.includes("mail")) {
+      console.log("[Agent] Manual email check requested");
+
+      try {
+        const result = await entity.execute({
+          actionName: "GMAIL_FETCH_EMAILS",
+          params: {
+            max_results: 5,
+            label_ids: ["INBOX"],
+          },
+        });
+
+        const data = result.data as any;
+        if (!result.successfull || !data?.messages || data.messages.length === 0) {
+          return "No emails found in your inbox.";
+        }
+
+        const emails = data.messages.slice(0, 5).map((email: any, i: number) => {
+          const emailId = email.id || email.messageId;
+          if (emailId) seenEmailIds.add(emailId); // Mark as seen
+          return `${i + 1}. From: ${email.from || "Unknown"}\n   Subject: ${email.subject || "No subject"}`;
+        }).join("\n\n");
+
+        return `Your latest emails:\n\n${emails}`;
+      } catch (error) {
+        console.error("[Email] Error:", error);
+        return "Couldn't fetch emails right now. Try again later.";
+      }
+    }
+
+    // Regular conversation
+    try {
+      const response = await openrouter.chat.completions.create({
+        model: "openai/gpt-4o-mini",
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: message }
+        ],
+        max_tokens: 256,
+      });
+
+      return response.choices[0]?.message?.content || "hmm let me think";
+    } catch (error) {
+      console.error("Error:", error);
+      return "something went wrong, try again?";
+    }
   }
 };
